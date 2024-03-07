@@ -1,0 +1,361 @@
+# Chill Path
+# Created by Svetlana Serikova Sep 2023
+#rm(list=ls()) # Clear local variables
+
+# Packages ----
+# Custom download of geoshaper
+# https://github.com/RedOakStrategic/geoshaper
+libs <- c('shiny','shinyWidgets','shinyjs','shinybusy','rsconnect','Rcpp','reshape2','plotly',
+          'leaflet','leaflet.extras','leaflet.extras2','leafem','leafgl','dplyr','rgdal','gstat',
+          'raster','geoshaper','stars','tidyverse','sp','sf','htmlwidgets')
+lapply(libs,require,character.only=T)
+
+# Source  script for data processing and functions ----
+source("./data_scripts/data_processing.R",local=T)
+
+## Server script ----
+server <- function(input,output,session){
+  # Set name and zone
+  app_name='Chill Path'
+  UTM_zone=32
+  start_zoom=13
+  # Create a reactive variable to track the selected polygon
+  selected_polygon <- reactiveVal()
+  # Create reactive values for the "Cool areas" layers
+  show_sk9 <- reactiveVal(F)
+  show_sk12 <- reactiveVal(F)
+  show_sk15 <- reactiveVal(F)
+  # Create reactive values for the "Hot areas" layers
+  show_msb2018_2020 <- reactiveVal(F)
+  show_msb2019_2021 <- reactiveVal(F)
+  show_msb2020_2022 <- reactiveVal(F)
+  # Create a reactive value to track the state of the Green Index layer
+  show_green_index <- reactiveVal(F)
+  # Initialize sel
+  selected_building <- reactiveVal()
+  selected_destination <- reactiveVal()
+  sel_reactive <- reactiveVal()
+  # Custom HTML control for the disclaimer popup
+  disclaimerControl <- function() {
+    html <- '<div id="disclaimer" style="background-color: #272B30; padding: 10px; text-align: center; border-radius: 5px;">
+              <p style="color: white; font-size: 18px;">Chill Path PROTOTYPE. Find your "coolest" way around the city.
+              Interactive webmap for Umeå. @ Norconsult</p>
+            </div>'
+  }
+  # Define a reactive value to track whether the legend has been added
+  legendAdded <- reactiveVal(F)
+  # Custom HTML control for the legend
+  legendControl <- function(show_destinations) {
+    html <- '<div id="legend" style="background-color: white; padding: 10px; text-align: center; border-radius: 5px; position: absolute; bottom: 40px; right: 10px;">
+            <div style="background-color: black; opacity: 0.4; width: 20px; height: 20px; border: 2px solid #FFEF82; display: inline-block;"></div>
+            <p style="font-size: 12px;">Buildings</p>'
+    if (show_destinations) {
+      # Include the same AwesomeMarker icon style in the legend
+      html <- paste0(html, '
+    <div style="width: 20px; height: 20px; display: inline-block;">
+      <i class="fa fa-leaf" style="color: #1A4D2E; background-color: white; font-size: 18px;"></i>
+    </div>
+    <p style="font-size: 12px;">Destinations</p>')
+    }
+    html <- paste0(html, '</div>')
+  }
+  # JavaScript code to hide the disclaimer
+  observe({
+    session$sendCustomMessage("hideDisclaimer","map")
+  })
+  # Initialize leaflet ----
+  output$Map <- renderLeaflet({
+    # the id of the map is "Map"
+    leaflet(
+      # Leaflet rendering and options
+      options=leafletOptions(maxZoom=19,
+                             wheelPxPerZoomLevel=80,
+                             zoomAnimation=T,
+                             worldCopyJump=T,
+                             preferCanvas=T,
+                             doubleClickZoom=F,
+                             # map won't update tiles until zoom is done
+                             updateWhenZooming=T,
+                             # map won't load new tiles when panning
+                             updateWhenIdle=F,
+                             updateInterval=50)) %>%
+      # Make it possible to store tile in browser cache (faster)
+      enableTileCaching() %>% 
+      setView(lng=20.2630,lat=63.8258,zoom=start_zoom)  %>% 
+      addControlGPS(options=gpsOptions(position="bottomleft",activate=T, 
+                                       autoCenter=T, 
+                                       setView=F)) %>%
+      addScaleBar(position=c("bottomright"), 
+                  options=scaleBarOptions(maxWidth=250,metric=T,imperial=F)) %>%
+      addMouseCoordinates() %>%
+      addMapPane('back_maps',100) %>%
+      addTiles(layerId='OSM',options=leafletOptions(pane="back_maps")) %>%
+      # Map Pane layer order
+      addMapPane("topo_map",zIndex=110) %>%
+      addMapPane("ortho",zIndex=140) %>%
+      # Add the disclaimer control
+      addControl(
+        html=disclaimerControl(),
+        position="bottomright"
+      )
+  }) 
+  # Leaflet proxy
+  proxy <- leafletProxy("Map") # proxy for accessing map
+  # Background maps
+  source("data_scripts/background_maps.R",local=T)
+  # Define a custom filtering function
+  filterDatgData <- function(sel,bg,rp) {
+    filtered_sel <- sel[sel$address %in% bg$address & sel$namn %in% rp$namn, ]
+  }
+  # Buildings
+  observe({
+    proxy %>%
+      addPolygons(
+        data=bg,
+        fillColor="black",
+        fillOpacity=0.4,
+        color="#FFEF82",
+        weight=2,
+        group="buildings",
+        label=~paste(address) # popup content when clicked
+      )
+  })
+  # Observe the click event on the "bg" polygons and toggle the destinations in the legend
+  type_palette <- c(Car="#F94C10",Bike="#F8DE22",Foot="black") ##367E18
+  observeEvent(input$Map_shape_click, {
+    click_lat <- input$Map_shape_click$lat
+    click_lng <- input$Map_shape_click$lng
+    # Check if a building is selected
+    selected_building <- TRUE
+    if (selected_building) {
+      # Filter sel based on selected building and destinations
+      filtered_sel <- filterDatgData(sel,bg,rp)
+      sel_reactive(filtered_sel)
+    }
+    show_destinations <- selected_building
+    # Clear the awesome-markers group from the leafletProxy
+    proxy %>% clearGroup("awesome-markers")
+    # Add the destination markers
+    if (show_destinations) {
+      awic <- makeAwesomeIcon(
+        icon="leaf",
+        iconColor="#1A4D2E",
+        markerColor="white",
+        library="fa"
+      )
+      proxy %>%
+        addAwesomeMarkers(icon=awic,
+                          data=rp,
+                          group="awesome-markers",  # Add them to a specific group to clear later
+                          label=~paste(namn),
+                          popup=~paste(namn)
+        )
+      proxy %>% addPolylines(
+        data=sel_reactive(),
+        color=~colorFactor(type_palette,domain=c("Car","Bike","Foot"))(type),
+        weight=5,
+        fillOpacity=0.01,
+        label=~paste("Path: ",type,"Duration, min: ",round(duration,3),"Distance, m: ",round((distance),3),
+                     "Calories burned, kcal:",cal_burnt_kcal,"Carbon emitted, equivalents:",round(CO2_emitted_e,3)),
+        group="routes"
+      )
+    }
+    # Check if the legend has been added
+    if (!legendAdded()) {
+      proxy %>%
+        addControl(
+          html=legendControl(show_destinations),
+          position="bottomright"
+        )
+      # Set the legendAdded reactive value to T to indicate that the legend has been added
+      legendAdded(T)
+    }
+  })
+  # Observe the click event on the "rp" markers
+  observeEvent(input$Map_marker_click, {
+    # Extract the information about the clicked marker
+    selected_destination <- input$Map_marker_click$destID
+    # Filter data based on the clicked marker
+    if (!is.null(selected_destination)) {
+      filtered_sel <- filterData(sel, bg, rp) 
+      sel_reactive(filtered_sel)
+      # Clear the routes group from the leafletProxy
+      proxy %>% clearGroup("routes")
+      # Add the polylines for the selected destination
+      proxy %>% addPolylines(
+        data=filtered_sel,
+        color=~colorFactor(type_palette,domain=c("Car","Bike","Foot"))(type),
+        weight=5,
+        fillOpacity=0.01,
+        label= ~paste("Path: ",type,  "Duration, min: ", round(duration, 3), "Distance, m: ", round(distance,3),
+                      "Calories burned, kcal:", cal_burnt_kcal, "Carbon emitted, equivalents:", round(CO2_emitted_e,3)),
+        group="routes"
+      )
+    }
+  })
+  # Cool areas ----
+  observeEvent(input$cool_areas, {
+    selected_layers <- input$cool_areas
+    layer_info <- list(
+      list(name="sk9",data=sk9,show=show_sk9,fillColor="black"),
+      list(name="sk12",data=sk12,show=show_sk12,fillColor="black"),
+      list(name="sk15",data=sk15,show=show_sk15,fillColor="black")
+    )
+    for (layer in layer_info) {
+      name <- layer$name
+      data <- layer$data
+      show <- layer$show
+      fillColor <- layer$fillColor
+      if (name %in% selected_layers) {
+        proxy %>%
+          clearGroup("green_index") %>%
+          clearGroup("cool_areas") %>%
+          clearGroup(c("hot_areas","MSB_2018_2020","MSB_2019_2021","MSB_2020_2022")) %>%
+          clearShapes() %>% 
+          addPolygons(
+            data=data,
+            fillColor=fillColor,
+            fillOpacity=0.6,
+            color="transparent",
+            weight=2,
+            group="cool_areas"
+          ) %>%
+          addPolygons(
+            data=bg,
+            fillColor="#FFEF82",
+            fillOpacity=0.6,
+            color="#FFEF82",
+            weight=2,
+            group="buildings"
+          )
+      } else {
+        show(F)
+      }
+    }
+  })
+  # MSB layers ----
+  msbLegendControl <- '
+<div id="msb-legend" style="background-color: white; padding: 10px; text-align: center; border-radius: 5px; position: absolute; bottom: 40px; right: 10px;">
+  <div style="font-size: 12px;">Max temperature, &deg;C</div>
+  <img src="MSBlegend.png" alt="MSB Legend" width="45px" height="580">
+</div>'
+  # Create a reactive value to track whether the MSB legend is added
+  msbLegendAdded <- reactiveVal(F)
+  # Observe "Hot areas"
+  observeEvent(input$hot_areas, {
+    proxy %>%
+      clearGroup("green_index") %>%
+      clearGroup("cool_areas") %>%
+      clearGroup(c("hot_areas","MSB_2018_2020","MSB_2019_2021","MSB_2020_2022")) %>% 
+      clearShapes()
+    # Check if any of the MSB layers are selected
+    msb_layers <- c("MSB_2018_2020","MSB_2019_2021","MSB_2020_2022")
+    msb_layers_selected <- any(msb_layers %in% input$hot_areas)
+    if (msb_layers_selected) {
+      # At least one MSB layer is selected, add the consolidated MSB legend
+      if (!msbLegendAdded()) {
+        proxy %>%
+          addControl(html=msbLegendControl,position="bottomright")
+        msbLegendAdded(T)
+      }
+      # Loop through the MSB layers
+      for (msb_layer in msb_layers) {
+        show_function <- paste("show_",msb_layer,sep="")
+        show <- ifelse(msb_layer %in% input$hot_areas,T,F)
+        if (show) {
+          proxy %>%
+            addRasterImage(
+              x=get(msb_layer),
+              colors=ramp,
+              opacity=0.7,
+              group="hot_areas"
+            )
+          assign(show_function,T,envir=.GlobalEnv)
+        } else {
+          assign(show_function,F,envir=.GlobalEnv)
+        }
+      }
+      # Recolor the "bg" layer
+      proxy %>%
+        addPolygons(
+          data=bg,
+          fillColor="black",
+          fillOpacity=0.1,
+          color="black",
+          weight=2,
+          group="buildings"
+        )
+    } else {
+      show(F)
+      # No MSB layers are selected, clear the consolidated MSB legend
+      if (msbLegendAdded()) {
+        proxy %>%
+          removeControl("msb-legend")  # Remove the control by its unique name
+        msbLegendAdded(F)
+      }
+    }
+  })
+  # GI layer ----
+ # legendControl <- function(show_green_index) {
+ #   if (show_green_index) {
+ #     html <- '<div id="legend" style="background-color: white; padding: 10px; text-align: center; border-radius: 5px; position: absolute; bottom: 40px; right: 10px; width: 55px;">
+ #             <div>
+ #               <span>0</span>
+ #               <div style="background: linear-gradient(to bottom, #F0BB62, #BFDB38, #367E18); height: 20px;"></div>
+ #               <span>1</span>
+ #             </div>
+ #             <div>Green Index</div>
+ #           </div>'
+ #   } else {
+ #     html <- ""
+ #   }
+ # }
+  # GI layer ----
+  observe({
+    show_green_index(input$show_green_index)
+  })
+  # Conditionally add the Green Index layer to the map
+  observe({
+    if (show_green_index()) {
+      proxy %>%
+        addPolylines(
+          data=gi,
+          color=~leaflet::colorNumeric(
+            palette=c("#F0BB62","#BFDB38","#367E18"),
+            domain=round(gi$green_index,digits=2)
+          )(round(green_index,digits=2)),
+          weight=1,
+          opacity=1,
+          group="green_index",  # add to a specific layer group
+          label=~paste("Green Index:",round(gi$green_index,digits=2)),  # display label on hover
+          labelOptions=labelOptions(
+            direction="auto"
+          ),
+          highlight=highlightOptions(
+            weight=5,
+            color="#666",
+            fillOpacity=0.7,
+            bringToFront=TRUE
+          )
+        )
+      # Add the legend control to the map
+  #    legendControlHtml <- legendControl(show_green_index())
+  #    proxy %>%
+  #      addControl(
+  #        html=as.character(HTML(legendControlHtml)),
+  #        position="bottomright"
+  #      )
+    } else {
+      # Remove the Green Index layer if the checkbox is unchecked
+      proxy %>%
+        clearGroup("green_index")
+  #    proxy %>%
+  #      removeControl("legend")
+    }
+  })
+  
+  # Leaflet proxy
+  proxy <- leafletProxy("Map") # proxy for accessing map
+  # Background maps  ----
+  source("data_scripts/background_maps.R",local=TRUE)
+} # END ----

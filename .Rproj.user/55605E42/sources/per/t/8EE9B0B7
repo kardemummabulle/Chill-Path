@@ -1,0 +1,23 @@
+{
+    "id": "8EE9B0B7",
+    "path": "U:/Organisation/Verksamhetsstöd/Digitalisering/GIS och fjärranalys/Umeå_climate_challange/Data/RShiny/data_scripts/data_processing.R",
+    "project_path": "data_scripts/data_processing.R",
+    "type": "r_source",
+    "hash": "3901495918",
+    "contents": "",
+    "dirty": false,
+    "created": 1697795702684.0,
+    "source_on_save": false,
+    "relative_order": 2,
+    "properties": {
+        "Source": "Source"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1697698686,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1697698686,
+    "read_only": false,
+    "read_only_alternatives": []
+}
